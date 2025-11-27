@@ -5,7 +5,7 @@ const CWA_API_BASE_URL = "https://opendata.cwa.gov.tw/api";
 const CWA_API_KEY = process.env.CWA_API_KEY;
 
 /**
- * 取得高雄天氣預報
+ * 取得基隆天氣預報
  * CWA 氣象資料開放平臺 API
  * 使用「一般天氣預報-今明 36 小時天氣預報」資料集
  */
@@ -22,7 +22,7 @@ const getKaohsiungWeather = async (req, res) => {
     // 呼叫 CWA API - 一般天氣預報（36小時）
     // API 文件: https://opendata.cwa.gov.tw/dist/opendata-swagger.html
     const response = await axios.get(
-      `${CWA_API_BASE_URL}/v1/rest/datastore/F-C0032-001`,
+      `${CWA_API_BASE_URL}/v1/rest/datastore/F-D0047-049`,
       {
         params: {
           Authorization: CWA_API_KEY,
@@ -37,7 +37,7 @@ const getKaohsiungWeather = async (req, res) => {
     if (!locationData) {
       return res.status(404).json({
         error: "查無資料",
-        message: "無法取得高雄市天氣資料",
+        message: "無法取得基隆市天氣資料",
       });
     }
 
