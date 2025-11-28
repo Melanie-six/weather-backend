@@ -3,8 +3,7 @@ const axios = require("axios");
 const CWA_API_BASE_URL = "https://opendata.cwa.gov.tw/api";
 const CWA_API_KEY = process.env.CWA_API_KEY;
 
-// 1. 縣市 vs API ID 對應表 (建議用各縣市專屬 ID，資料比較準且小)
-// 這些 ID 是對應到「未來1週天氣預報」
+// 1. 縣市 vs API ID (專屬 ID)
 const CITY_API_ID_MAP = {
   "基隆市": "F-D0047-051",
   "臺北市": "F-D0047-063",
@@ -44,8 +43,6 @@ const CITY_DISTRICT_MAP = {
 const getCityWeather = async (req, res) => {
   try {
     const cityName = req.params.city || "基隆市";
-    
-    // 優先使用縣市專用 ID，如果沒有就回退到全台 ID (091)
     const apiId = CITY_API_ID_MAP[cityName] || "F-D0047-091";
     const districtName = CITY_DISTRICT_MAP[cityName];
 
@@ -69,20 +66,12 @@ const getCityWeather = async (req, res) => {
         return res.status(500).json({ error: "API 回傳錯誤", details: apiResult.error });
     }
 
-    // === 關鍵修改：萬能結構解析器 ===
-    // 自動處理 Locations/locations 以及多層/少層的問題
+    // === 結構解析 (Locations/Location) ===
     const records = apiResult.records;
     let targetLocation = null;
 
-    // 狀況 A: F-D0047-091 (全台) -> records.locations[0].location
-    // 狀況 B: F-D0047-051 (單縣市) -> records.locations[0].location
-    // 狀況 C: 你的觀察 (大寫) -> records.Locations[0].Location
-    
-    // 1. 先抓出最外層的 location 集合 (不管大寫小寫)
     const locationsList = records.locations || records.Locations;
-    
     if (locationsList && locationsList.length > 0) {
-        // 這層裡面通常還有一個 location/Location 陣列
         const innerLocation = locationsList[0].location || locationsList[0].Location;
         if (innerLocation) {
              targetLocation = innerLocation.find(loc => 
@@ -90,7 +79,6 @@ const getCityWeather = async (req, res) => {
              );
         }
     } else if (records.location || records.Location) {
-        // 狀況 D: F-C0032-001 (舊版) -> records.location (沒有 locations 那層)
         const directLocation = records.location || records.Location;
         targetLocation = directLocation.find(loc => 
             (loc.locationName === districtName) || (loc.LocationName === districtName)
@@ -98,38 +86,50 @@ const getCityWeather = async (req, res) => {
     }
 
     if (!targetLocation) {
-        // 印出結構讓你看看到底長怎樣
         console.error("[Structure Error] Records keys:", Object.keys(records));
-        return res.status(404).json({ 
-            error: "找不到區域資料", 
-            message: `無法在 ${apiId} 結構中找到 ${districtName}，請檢查 Logs` 
-        });
+        return res.status(404).json({ error: "找不到區域資料", message: `在結構中找不到 ${districtName}` });
     }
 
-    // === 資料整理 (也相容大小寫欄位) ===
+    // === 關鍵修正：氣象要素解析 (兼容大寫 ElementName) ===
     const elements = {};
     const weatherElement = targetLocation.weatherElement || targetLocation.WeatherElement;
     
-    weatherElement.forEach(el => {
-      // 統一轉成小寫 key，方便後面取用 (例如 PoP12h 可能變 pop12h)
-      // 但我們保留原始 elementName 當作 key
-      elements[el.elementName] = el.time || el.Time;
-    });
-
-    // 準備解析 (以溫度 T 為基準)
-    const timeArr = elements['T']; 
-    if (!timeArr) {
-         return res.status(500).json({ error: "資料缺漏", message: "找不到溫度(T)資料" });
+    if (!weatherElement) {
+         return res.status(500).json({ error: "資料結構異常", message: "找不到 weatherElement 欄位" });
     }
 
+    weatherElement.forEach(el => {
+      // 同時檢查小寫 elementName 與大寫 ElementName
+      const name = el.elementName || el.ElementName;
+      const timeData = el.time || el.Time;
+      if (name) {
+          elements[name] = timeData;
+      }
+    });
+
+    // 檢查是否有抓到 'T' (溫度)
+    const timeArr = elements['T']; 
+    if (!timeArr) {
+         // 印出抓到了哪些 Key，方便除錯
+         const foundKeys = Object.keys(elements);
+         console.error(`[Missing Data] 找不到 T，但發現了: ${foundKeys.join(", ")}`);
+         return res.status(500).json({ error: "資料缺漏", message: `找不到溫度(T)資料，僅發現: ${foundKeys.join(",")}` });
+    }
+
+    // === 數值解析 (兼容大寫 ElementValue/Value) ===
     const forecasts = timeArr.map((timeItem, index) => {
-      // 輔助函式：安全取值 (防止 undefined)
+      
       const getValue = (eleKey, valIndex = 0) => {
           const item = elements[eleKey]?.[index];
           if (!item) return null;
-          // 有些 API 是 elementValue，有些是 ElementValue
+          
+          // 兼容 elementValue / ElementValue
           const values = item.elementValue || item.ElementValue;
-          return values?.[valIndex]?.value || values?.[valIndex]?.Value || "--";
+          if (!values) return null;
+
+          // 兼容 value / Value
+          const targetVal = values[valIndex];
+          return targetVal?.value || targetVal?.Value || "--";
       };
 
       return {
@@ -139,8 +139,8 @@ const getCityWeather = async (req, res) => {
         rain: getValue('PoP12h', 0) === " " ? "0" : getValue('PoP12h', 0), 
         temp: getValue('T', 0),
         humid: getValue('RH', 0),
-        windSpeed: getValue('WS', 0), // 風速
-        windScale: getValue('WS', 1), // 風級
+        windSpeed: getValue('WS', 0), 
+        windScale: getValue('WS', 1), 
       };
     });
 
