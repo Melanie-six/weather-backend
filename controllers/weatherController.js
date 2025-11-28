@@ -3,7 +3,7 @@ const axios = require("axios");
 const CWA_API_BASE_URL = "https://opendata.cwa.gov.tw/api";
 const CWA_API_KEY = process.env.CWA_API_KEY;
 
-// 1. 縣市 vs API ID (專屬 ID)
+// 1. 縣市 vs API ID
 const CITY_API_ID_MAP = {
   "基隆市": "F-D0047-051",
   "臺北市": "F-D0047-063",
@@ -40,6 +40,25 @@ const CITY_DISTRICT_MAP = {
   "高雄市": "苓雅區",
 };
 
+// 3. 欄位名稱翻譯表 (中文名稱 -> 英文代碼)
+// 這是解決這次錯誤的關鍵！
+const ELEMENT_MAPPING = {
+    "平均溫度": "T",
+    "T": "T",
+    
+    "12小時降雨機率": "PoP12h",
+    "PoP12h": "PoP12h",
+    
+    "平均相對濕度": "RH",
+    "RH": "RH",
+    
+    "風速": "WS",
+    "WS": "WS",
+    
+    "天氣現象": "Wx",
+    "Wx": "Wx"
+};
+
 const getCityWeather = async (req, res) => {
   try {
     const cityName = req.params.city || "基隆市";
@@ -52,11 +71,11 @@ const getCityWeather = async (req, res) => {
         return res.status(400).json({ error: "未設定代表區域", message: `請新增 ${cityName} 的預設區域` });
     }
 
+    // 這裡拿掉 elementName 參數，直接抓全部，避免過濾失敗
     const response = await axios.get(`${CWA_API_BASE_URL}/v1/rest/datastore/${apiId}`, {
       params: {
         Authorization: CWA_API_KEY,
         locationName: districtName,
-        elementName: "T,PoP12h,RH,WS,Wx",
         sort: "time"
       },
     });
@@ -66,7 +85,7 @@ const getCityWeather = async (req, res) => {
         return res.status(500).json({ error: "API 回傳錯誤", details: apiResult.error });
     }
 
-    // === 結構解析 (Locations/Location) ===
+    // === 結構解析 ===
     const records = apiResult.records;
     let targetLocation = null;
 
@@ -86,48 +105,46 @@ const getCityWeather = async (req, res) => {
     }
 
     if (!targetLocation) {
-        console.error("[Structure Error] Records keys:", Object.keys(records));
         return res.status(404).json({ error: "找不到區域資料", message: `在結構中找不到 ${districtName}` });
     }
 
-    // === 關鍵修正：氣象要素解析 (兼容大寫 ElementName) ===
+    // === 關鍵修正：欄位翻譯 ===
     const elements = {};
     const weatherElement = targetLocation.weatherElement || targetLocation.WeatherElement;
     
     if (!weatherElement) {
-         return res.status(500).json({ error: "資料結構異常", message: "找不到 weatherElement 欄位" });
+         return res.status(500).json({ error: "資料結構異常", message: "找不到 weatherElement" });
     }
 
     weatherElement.forEach(el => {
-      // 同時檢查小寫 elementName 與大寫 ElementName
-      const name = el.elementName || el.ElementName;
-      const timeData = el.time || el.Time;
-      if (name) {
-          elements[name] = timeData;
+      // 取得原始名稱 (可能是 "平均溫度" 或 "T")
+      const rawName = el.elementName || el.ElementName;
+      // 查表翻譯成英文代碼
+      const codeName = ELEMENT_MAPPING[rawName];
+      
+      // 如果這個欄位是我們需要的 (有在 Mapping 裡)，就存起來
+      if (codeName) {
+          elements[codeName] = el.time || el.Time;
       }
     });
 
-    // 檢查是否有抓到 'T' (溫度)
+    // 檢查是否有抓到 'T'
     const timeArr = elements['T']; 
     if (!timeArr) {
-         // 印出抓到了哪些 Key，方便除錯
          const foundKeys = Object.keys(elements);
-         console.error(`[Missing Data] 找不到 T，但發現了: ${foundKeys.join(", ")}`);
-         return res.status(500).json({ error: "資料缺漏", message: `找不到溫度(T)資料，僅發現: ${foundKeys.join(",")}` });
+         return res.status(500).json({ error: "資料缺漏", message: `翻譯後仍找不到 T，翻譯到的欄位: ${foundKeys.join(",")}` });
     }
 
-    // === 數值解析 (兼容大寫 ElementValue/Value) ===
+    // === 數值解析 ===
     const forecasts = timeArr.map((timeItem, index) => {
       
       const getValue = (eleKey, valIndex = 0) => {
           const item = elements[eleKey]?.[index];
           if (!item) return null;
           
-          // 兼容 elementValue / ElementValue
           const values = item.elementValue || item.ElementValue;
           if (!values) return null;
 
-          // 兼容 value / Value
           const targetVal = values[valIndex];
           return targetVal?.value || targetVal?.Value || "--";
       };
