@@ -16,7 +16,8 @@ app.get("/", (req, res) => {
   res.json({
     message: "歡迎使用 CWA 天氣預報 API",
     endpoints: {
-      kaohsiung: "/api/weather/kaohsiung",
+      //kaohsiung: "/api/weather/kaohsiung",
+      cityWeather: "/api/weather/:city (例如: /api/weather/基隆市)",
       health: "/api/health",
     },
   });
