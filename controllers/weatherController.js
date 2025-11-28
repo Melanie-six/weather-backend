@@ -3,7 +3,7 @@ const axios = require("axios");
 const CWA_API_BASE_URL = "https://opendata.cwa.gov.tw/api";
 const CWA_API_KEY = process.env.CWA_API_KEY;
 
-// 1. 縣市 vs API ID (專屬 ID)
+// 1. 縣市 vs API ID (對應各縣市的「未來1週天氣預報」)
 const CITY_API_ID_MAP = {
   "基隆市": "F-D0047-051",
   "臺北市": "F-D0047-063",
@@ -29,29 +29,44 @@ const CITY_API_ID_MAP = {
   "連江縣": "F-D0047-083"
 };
 
-// 2. 代表行政區
+// 2. 縣市 vs 預設行政區 (已補齊全台 22 縣市的市中心/政府所在地)
 const CITY_DISTRICT_MAP = {
   "基隆市": "仁愛區",
   "臺北市": "信義區",
   "新北市": "板橋區",
+  "桃園市": "桃園區",
   "新竹市": "東區",
+  "新竹縣": "竹北市",
+  "苗栗縣": "苗栗市",
   "臺中市": "西屯區",
+  "彰化縣": "彰化市",
+  "南投縣": "南投市",
+  "雲林縣": "斗六市",
+  "嘉義市": "東區",
+  "嘉義縣": "太保市",
   "臺南市": "安平區",
   "高雄市": "苓雅區",
-  // 你可以自行增加其他縣市的區
+  "屏東縣": "屏東市",
+  "宜蘭縣": "宜蘭市",
+  "花蓮縣": "花蓮市",
+  "臺東縣": "臺東市",
+  "澎湖縣": "馬公市",
+  "金門縣": "金城鎮",
+  "連江縣": "南竿鄉"
 };
 
 const getCityWeather = async (req, res) => {
   try {
     const cityName = req.params.city || "基隆市";
-    // 預設使用全台 ID (091)，如果有專屬 ID 則使用專屬 ID
+    // 取得 API ID (預設 fallback 到全台資料 091，但不建議)
     const apiId = CITY_API_ID_MAP[cityName] || "F-D0047-091";
+    // 取得行政區
     const districtName = CITY_DISTRICT_MAP[cityName];
 
     // console.log(`[Query] 城市: ${cityName}, 區域: ${districtName}, API_ID: ${apiId}`);
 
     if (!districtName) {
-        return res.status(400).json({ error: "未設定代表區域", message: `請新增 ${cityName} 的預設區域` });
+        return res.status(400).json({ error: "不支援的城市", message: `目前尚未設定 ${cityName} 的預設區域` });
     }
 
     const response = await axios.get(`${CWA_API_BASE_URL}/v1/rest/datastore/${apiId}`, {
@@ -67,72 +82,82 @@ const getCityWeather = async (req, res) => {
         return res.status(500).json({ error: "API 回傳錯誤", details: apiResult.error });
     }
 
-    // === 1. 進入 Location 層級 (根據你提供的 JSON 結構) ===
-    // 結構是 records.Locations[0].Location
+    // === 1. 結構解析 (相容 Locations/locations) ===
     const records = apiResult.records;
     let targetLocation = null;
 
+    // 處理大寫 Locations (新版 API 常見)
     if (records.Locations && records.Locations[0] && records.Locations[0].Location) {
         targetLocation = records.Locations[0].Location.find(loc => loc.LocationName === districtName);
+    }
+    // 處理小寫 locations (部分舊版或全台 API)
+    else if (records.locations && records.locations[0] && records.locations[0].location) {
+        targetLocation = records.locations[0].location.find(loc => loc.locationName === districtName);
+    }
+    // 處理直接 location (少見但有)
+    else if (records.location) {
+        targetLocation = records.location.find(loc => loc.locationName === districtName);
     }
 
     if (!targetLocation) {
         return res.status(404).json({ error: "找不到區域資料", message: `在資料中找不到 ${districtName}` });
     }
 
-    // === 2. 整理氣象要素 (WeatherElement) ===
-    // 我們把整包資料存進 Map，Key 用中文名稱
+    // === 2. 整理氣象要素 (相容大小寫 ElementName/elementName) ===
     const rawElements = {};
-    targetLocation.WeatherElement.forEach(el => {
-        rawElements[el.ElementName] = el.Time;
+    const weatherElement = targetLocation.WeatherElement || targetLocation.weatherElement;
+
+    if (!weatherElement) {
+         return res.status(500).json({ error: "資料結構異常", message: "找不到 WeatherElement" });
+    }
+
+    weatherElement.forEach(el => {
+        // 統一使用 ElementName 當 Key (例如 "平均溫度")
+        const name = el.ElementName || el.elementName;
+        const timeData = el.Time || el.time;
+        if (name && timeData) {
+            rawElements[name] = timeData;
+        }
     });
 
-    // 檢查有沒有抓到「平均溫度」這個關鍵欄位
+    // 檢查有沒有抓到「平均溫度」
     const timeArr = rawElements['平均溫度'];
     if (!timeArr) {
         return res.status(500).json({ error: "資料缺漏", message: "找不到 '平均溫度' 資料" });
     }
 
-    // === 3. 解析數值 (針對你的 JSON 格式) ===
+    // === 3. 解析數值 (針對動態 Key 結構) ===
     const forecasts = timeArr.map((timeItem, index) => {
         
-        // 輔助函式：從 rawElements 裡抓值
-        // name: 中文要素名稱 (例如 "平均相對濕度")
-        // key: JSON 裡面的英文 Key (例如 "RelativeHumidity")
+        // 輔助函式：抓值
         const getVal = (name, key) => {
             const times = rawElements[name];
             if (!times || !times[index]) return "--";
             
-            const values = times[index].ElementValue;
+            // 相容 ElementValue / elementValue
+            const values = times[index].ElementValue || times[index].elementValue;
             if (!values || !values[0]) return "--";
             
+            // 直接取對應的 key (例如 "Temperature")
             return values[0][key] || "--";
         };
 
         return {
-            startTime: timeItem.StartTime,
-            endTime: timeItem.EndTime,
-            // 溫度 -> 找 "平均溫度" -> 裡的 "Temperature"
+            // 相容 StartTime / startTime
+            startTime: timeItem.StartTime || timeItem.startTime,
+            endTime: timeItem.EndTime || timeItem.endTime,
+            
             temp: getVal("平均溫度", "Temperature"),
             
-            // 降雨 -> 找 "12小時降雨機率" -> 裡的 "ProbabilityOfPrecipitation"
-            rain: getVal("12小時降雨機率", "ProbabilityOfPrecipitation") === " " ? "0" : getVal("12小時降雨機率", "ProbabilityOfPrecipitation"),
+            // 降雨機率：如果回傳 " " (空) 或 "-" 則顯示 0
+            rain: (getVal("12小時降雨機率", "ProbabilityOfPrecipitation") === " " || getVal("12小時降雨機率", "ProbabilityOfPrecipitation") === "-") ? "0" : getVal("12小時降雨機率", "ProbabilityOfPrecipitation"),
             
-            // 濕度 -> 找 "平均相對濕度" -> 裡的 "RelativeHumidity"
             humid: getVal("平均相對濕度", "RelativeHumidity"),
-            
-            // 天氣 -> 找 "天氣現象" -> 裡的 "Weather"
             weather: getVal("天氣現象", "Weather"),
-            
-            // 風速 (m/s) -> 找 "風速" -> 裡的 "WindSpeed"
             windSpeed: getVal("風速", "WindSpeed"),
-            
-            // 風級 -> 找 "風速" -> 裡的 "BeaufortScale"
             windScale: getVal("風速", "BeaufortScale")
         };
     });
-
-    // console.log(`[Success] 成功取得 ${cityName} 資料`);
 
     res.json({
       success: true,
